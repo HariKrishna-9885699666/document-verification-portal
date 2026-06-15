@@ -6,7 +6,7 @@ A cloud-native web application for secure document upload, verification, and sta
 
 ## Table of Contents
 
-1. [Flow Explanation (Layman's Terms)](#1-flow-explanation-laymans-terms)
+1. [Flow Explanation](#1-flow-explanation-laymans-terms)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Project Structure](#3-project-structure)
 4. [Prerequisites](#4-prerequisites)
@@ -20,7 +20,7 @@ A cloud-native web application for secure document upload, verification, and sta
 
 ---
 
-## 1. Flow Explanation (Layman's Terms)
+## 1. Flow Explanation
 
 Think of the system like a **digital document checking office** with multiple departments. Here's how every piece fits together, step by step:
 
