@@ -8,16 +8,17 @@ This document explains every AWS resource used in this project, why it's needed,
 
 1. [AWS Overview — What is AWS?](#1-aws-overview--what-is-aws)
 2. [Complete Data Flow (AWS Edition)](#2-complete-data-flow-aws-edition)
-3. [Resource 1: S3 Buckets](#3-resource-1-s3-buckets)
-4. [Resource 2: IAM Roles & Policies](#4-resource-2-iam-roles--policies)
-5. [Resource 3: Lambda Function](#5-resource-3-lambda-function)
-6. [Resource 4: API Gateway](#6-resource-4-api-gateway)
-7. [Resource 5: EventBridge](#7-resource-5-eventbridge)
-8. [Resource 6: RDS (PostgreSQL)](#8-resource-6-rds-postgresql)
-9. [Resource 7: EKS Cluster](#9-resource-7-eks-cluster)
-10. [Step-by-Step: Create Everything Manually](#10-step-by-step-create-everything-manually)
-11. [IAM Policies Explained in Detail](#11-iam-policies-explained-in-detail)
-12. [How Floci Emulates All of This Locally](#12-how-floci-emulates-all-of-this-locally)
+3. [End-to-End Step-by-Step Flow](#3-end-to-end-step-by-step-flow)
+4. [Resource 1: S3 Buckets](#4-resource-1-s3-buckets)
+5. [Resource 2: IAM Roles & Policies](#5-resource-2-iam-roles--policies)
+6. [Resource 3: Lambda Function](#6-resource-3-lambda-function)
+7. [Resource 4: API Gateway](#7-resource-4-api-gateway)
+8. [Resource 5: EventBridge](#8-resource-5-eventbridge)
+9. [Resource 6: RDS (PostgreSQL)](#9-resource-6-rds-postgresql)
+10. [Resource 7: EKS Cluster](#10-resource-7-eks-cluster)
+11. [Step-by-Step: Create Everything Manually](#11-step-by-step-create-everything-manually)
+12. [IAM Policies Explained in Detail](#12-iam-policies-explained-in-detail)
+13. [How Floci Emulates All of This Locally](#13-how-floci-emulates-all-of-this-locally)
 
 ---
 
@@ -95,7 +96,326 @@ Here's how data flows through all the AWS resources when a user uploads a docume
 
 ---
 
-## 3. Resource 1: S3 Buckets
+## 3. End-to-End Step-by-Step Flow
+
+This section walks through the complete journey of a document — from the user's browser, through the backend API, across all AWS services, and back to the user. Each step shows which AWS resources are involved.
+
+### The Complete Journey
+
+```
+                    AWS SERVICES INVOLVED AT EACH STEP
+
+  FRONTEND                    BACKEND (Lambda)              AWS INFRASTRUCTURE
+  ────────                    ────────────────              ─────────────────
+                                                                           
+  Register/Login ──────────▶  Auth Service ───────────────▶ RDS (users table)
+                                   │                       
+                                   │  JWT token created    
+                                   │                       
+  Upload Doc ──────────────────▶  Document Service ──────▶ RDS (documents table)
+                                   │                       
+                                   ├── Generate presigned URL ──▶ S3 (raw bucket)
+                                   │                       
+                                   └── Fire EventBridge event ──▶ EventBridge
+                                                                       │
+                                                                       ▼
+                                                              EKS Worker (OCR)
+                                                                       │
+                                                              Reads from S3
+                                                                       │
+                                                              Runs Tesseract
+                                                                       │
+  OCR Result ◀──────────────────  Receive OCR data ────────  Writes to API
+                                   │                       
+                                   ├── Save to DB ─────────▶ RDS (ocr_data)
+                                   │                       
+                                   ├── Copy JSON to S3 ────▶ S3 (processed)
+                                   │                       
+                                   └── Fire EventBridge ───▶ EventBridge
+                                                                       
+  Pending Docs ◀───────────────  Admin Service ───────────▶ RDS (REVIEW_PENDING)
+                                                                       
+  Admin Approves ──────────────▶  Update status ──────────▶ RDS (APPROVED)
+                                   │                       
+                                   └── Fire EventBridge ───▶ EventBridge
+                                                                       
+  Check Status ◀───────────────  Status Service ──────────▶ RDS (SELECT status)
+```
+
+---
+
+### Step 1: User Registration
+
+```
+Browser                           Backend (Lambda)                  AWS
+───────                           ────────────────                  ───
+
+                                  1. Receive POST /api/auth/register
+                                  2. Validate input (name, email, password)
+                                  3. Hash password with bcrypt (cost 12)
+                                  4. INSERT INTO users (id, name, email, password_hash, role)
+                                                                      │
+                                                                      ▼
+                                                                  RDS: users table
+                                  5. Sign JWT token (sub: user.id, role: user.role)
+                                  6. Return { user, token }
+```
+
+**AWS resources used at this step:**
+
+| Resource | Role in this step |
+|---|---|
+| **Lambda** | Runs the NestJS auth controller code |
+| **API Gateway** | Receives the HTTP POST request and forwards to Lambda |
+| **RDS** | Stores the new user record permanently |
+| **IAM (LambdaRole)** | Grants Lambda permission to write to RDS |
+
+**What the user experiences:**
+1. Opens browser at `http://localhost:3000/register`
+2. Enters name, email, password
+3. Clicks "Register"
+4. Gets redirected to Dashboard (JWT token stored in browser's localStorage)
+
+---
+
+### Step 2: User Uploads a Document
+
+```
+Browser                           Backend (Lambda)                  AWS
+───────                           ────────────────                  ───
+
+1. Select file + doc type
+
+                                  2. Receive POST /api/documents/upload-url
+                                  3. Generate documentId (UUID)
+                                  4. Create S3 key: {userId}/{docId}/original.pdf
+                                  5. INSERT INTO documents (id, user_id, document_type, status='UPLOADED', s3_key)
+                                                                      │
+                                                                      ▼
+                                                                  RDS: documents table
+                                  6. Call S3Service.getSignedUploadUrl(s3Key)
+                                     ──────────────────────────────────────────▶  S3: Generate presigned PUT URL
+                                  7. Call EventBridgeService.putEvent('DocumentUploaded')
+                                     ──────────────────────────────────────────▶  EventBridge: Store event
+                                  8. Return { documentId, uploadUrl }
+                                    
+9. PUT file to S3 using uploadUrl
+   ──────────────────────────────────────────────────────────────────────────▶  S3: dvp-documents-raw/{s3Key}
+```
+
+**AWS resources used at this step:**
+
+| Resource | Role in this step |
+|---|---|
+| **Lambda** | Generates document ID, creates DB record, calls S3 + EventBridge |
+| **API Gateway** | Receives `POST /api/documents/upload-url` |
+| **S3 (raw)** | Stores the uploaded file (target of the presigned URL) |
+| **EventBridge** | Receives `DocumentUploaded` event for downstream processing |
+| **RDS** | Stores document metadata row |
+| **IAM (LambdaRole)** | LambdaRole's `S3Access` policy allows generating presigned URLs; `EventBridgeAccess` allows `PutEvents` |
+
+**What the user experiences:**
+1. Goes to Upload page (`/upload`)
+2. Selects document type (Aadhaar, PAN, etc.)
+3. Picks a file (PDF, JPG, PNG)
+4. Clicks "Upload"
+5. Sees success message with document ID
+
+**Why presigned URLs?** The user's browser never needs AWS credentials. The presigned URL is a temporary (1-hour) token that grants PUT permission to a specific S3 key. The file goes directly from browser to S3 without passing through our server.
+
+---
+
+### Step 3: OCR Processing
+
+```
+EventBridge                        Worker (FastAPI)                  AWS
+──────────                        ────────────────                  ───
+
+1. EventBridge delivers 'DocumentUploaded' event
+   ────────────────────────────────────────────────▶
+
+                                  2. Worker receives task (documentId, s3Key, documentType)
+                                  3. Download file from S3:
+                                     GET dvp-documents-raw/{s3Key}
+                                     ──────────────────────────────────────────▶  S3: Return file bytes
+                                  4. Run Tesseract OCR on the image/PDF
+                                  5. Apply document-type extractor (regex patterns):
+                                     - Aadhaar: find 12-digit number, name, DOB
+                                     - PAN: find 10-char alphanumeric, name
+                                     - Passport: find passport number, name
+                                  6. POST extracted data back to backend:
+                                     PATCH /api/documents/{id}/ocr
+                                     ──────────────────────────────────────────▶
+
+Backend (Lambda)                                                   AWS
+───────────────                                                   ───
+
+                                  7. Receive OCR data
+                                  8. UPDATE documents SET ocr_data = {...}, status = 'OCR_COMPLETED'
+                                                                      │
+                                                                      ▼
+                                                                  RDS: documents table updated
+                                  9. Copy OCR JSON to processed S3:
+                                     PUT dvp-documents-processed/{s3Key/processed.json}
+                                     ──────────────────────────────────────────▶  S3: OCR result stored
+                                  10. Call EventBridgeService.putEvent('OCRCompleted')
+                                      ──────────────────────────────────────────▶  EventBridge: Status update
+```
+
+**AWS resources used at this step:**
+
+| Resource | Role in this step |
+|---|---|
+| **EventBridge** | Delivers `DocumentUploaded` event to the OCR worker target |
+| **EKS (Worker Pod)** | Runs the Python FastAPI OCR processing container |
+| **S3 (raw)** | Source of the uploaded document for OCR |
+| **S3 (processed)** | Destination for OCR JSON results |
+| **Lambda** | Receives OCR results, updates DB + S3 + EventBridge |
+| **RDS** | Updated with OCR data and new status |
+| **IAM (EKSWorkerRole)** | `S3ReadAccess` policy allows worker to download from S3 |
+| **IAM (LambdaRole)** | `S3Access` policy allows writing processed JSON; `RDSDataAccess` for DB update |
+
+**What happens behind the scenes:**
+1. This step is fully automated — no user interaction needed
+2. The worker extracts structured data using regex patterns tailored to each document type
+3. On failure, the system retries up to 3 times (configurable)
+
+---
+
+### Step 4: Admin Reviews the Document
+
+```
+Admin Browser                      Backend (Lambda)                  AWS
+────────────                      ────────────────                  ───
+
+1. Admin logs in (JWT auth)
+2. Opens Admin Dashboard
+                                  3. Receive GET /api/admin/documents/pending
+                                  4. SELECT * FROM documents WHERE status = 'REVIEW_PENDING'
+                                                                      │
+                                                                      ▼
+                                                                  RDS: Return pending docs
+                                  5. Return list to admin
+
+6. Admin views document details + OCR data
+7. Clicks "Approve" or "Reject"
+
+  For APPROVE:                  8. Receive PATCH /api/admin/documents/{id}/approve
+                                  9. UPDATE documents SET status = 'APPROVED' [, remarks = '...']
+                                                                      │
+                                                                      ▼
+                                                                  RDS: Status updated
+                                  10. AuditService.log('document', id, 'APPROVED', adminId)
+                                  11. Call EventBridgeService.putEvent('VerificationCompleted',
+                                      { result: 'APPROVED' })
+                                      ──────────────────────────────────────────▶  EventBridge: Notification
+                                  12. Return updated document
+
+  For REJECT:                    Same flow, status = 'REJECTED', remarks = rejection reason
+```
+
+**AWS resources used at this step:**
+
+| Resource | Role in this step |
+|---|---|
+| **Lambda** | Runs admin controller, queries pending docs, updates status |
+| **API Gateway** | Receives admin API calls |
+| **RDS** | Stores updated document status |
+| **EventBridge** | Fires `VerificationCompleted` event for notification systems |
+| **IAM (LambdaRole)** | All three policies active (S3, EventBridge, RDS) |
+
+**What the admin experiences:**
+1. Logs in with ADMIN or SUPER_ADMIN role
+2. Navigates to Admin Dashboard (`/admin`)
+3. Sees a table of all documents in "REVIEW_PENDING" status
+4. Clicks "View" to see document details and OCR-extracted data
+5. Compares original document (downloaded from S3) with OCR results
+6. Clicks "Approve" (green button) or "Reject" (red button)
+7. For rejection, enters a reason in the prompt dialog
+8. Document disappears from the pending list
+
+---
+
+### Step 5: User Checks Status
+
+```
+Browser                           Backend (Lambda)                  AWS
+───────                           ────────────────                  ───
+
+1. User opens Dashboard
+                                  2. Receive GET /api/documents
+                                  3. SELECT * FROM documents WHERE user_id = :userId
+                                                                      │
+                                                                      ▼
+                                                                  RDS: Return user's docs
+                                  4. Return document list with statuses
+
+5. Or check specific document:
+                                  6. Receive GET /api/documents/{id}/status
+                                  7. SELECT status FROM documents WHERE id = :id
+                                                                      │
+                                                                      ▼
+                                                                  RDS: Return status
+                                  8. Return { status: 'APPROVED' }
+
+9. StatusBadge component renders color-coded badge:
+   UPLOADED      → Gray
+   PROCESSING    → Yellow
+   OCR_COMPLETED → Blue
+   REVIEW_PENDING→ Orange
+   APPROVED      → Green
+   REJECTED      → Red
+```
+
+**AWS resources used at this step:**
+
+| Resource | Role in this step |
+|---|---|
+| **Lambda** | Queries document status from database |
+| **API Gateway** | Receives status check requests |
+| **RDS** | Returns current document status |
+| **IAM (LambdaRole)** | `RDSDataAccess` for querying |
+
+**What the user experiences:**
+1. Logs in and sees Dashboard with all their documents
+2. Each document shows a colored status badge
+3. Clicks "View" on a document to see full details + OCR data
+4. Green badge = approved, Red badge = rejected (with remarks visible)
+
+---
+
+### Status Workflow Summary
+
+```
+UPLOADED
+    │  (user uploads file to S3)
+    ▼
+PROCESSING
+    │  (OCR worker starts)
+    ▼
+OCR_COMPLETED
+    │  (OCR done, waiting for admin)
+    ▼
+REVIEW_PENDING
+    │
+    ├──► APPROVED    (admin clicks approve)
+    │
+    └──► REJECTED    (admin clicks reject with remarks)
+```
+
+### AWS Resources Used Across ALL Steps
+
+| Step | S3 | Lambda | API GW | EventBridge | RDS | EKS | IAM |
+|---|---|---|---|---|---|---|---|
+| 1. Register | | ✅ | ✅ | | ✅ | | ✅ |
+| 2. Upload | ✅ | ✅ | ✅ | ✅ | ✅ | | ✅ |
+| 3. OCR | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 4. Review | | ✅ | ✅ | ✅ | ✅ | | ✅ |
+| 5. Status | | ✅ | ✅ | | ✅ | | ✅ |
+
+---
+
+## 4. Resource 1: S3 Buckets
 
 ### What is S3?
 
@@ -182,7 +502,7 @@ aws s3api put-public-access-block \
 
 ---
 
-## 4. Resource 2: IAM Roles & Policies
+## 5. Resource 2: IAM Roles & Policies
 
 ### What is IAM?
 
@@ -345,7 +665,7 @@ aws iam put-role-policy \
 
 ---
 
-## 5. Resource 3: Lambda Function
+## 6. Resource 3: Lambda Function
 
 ### What is Lambda?
 
@@ -456,7 +776,7 @@ aws lambda create-function \
 
 ---
 
-## 6. Resource 4: API Gateway
+## 7. Resource 4: API Gateway
 
 ### What is API Gateway?
 
@@ -516,7 +836,7 @@ aws apigatewayv2 get-api --api-id YOUR_API_ID
 
 ---
 
-## 7. Resource 5: EventBridge
+## 8. Resource 5: EventBridge
 
 ### What is EventBridge?
 
@@ -650,7 +970,7 @@ aws events put-targets \
 
 ---
 
-## 8. Resource 6: RDS (PostgreSQL)
+## 9. Resource 6: RDS (PostgreSQL)
 
 ### What is RDS?
 
@@ -753,7 +1073,7 @@ aws rds create-db-instance \
 
 ---
 
-## 9. Resource 7: EKS Cluster
+## 10. Resource 7: EKS Cluster
 
 ### What is EKS?
 
@@ -850,7 +1170,7 @@ kubectl apply -f k8s/backend-service.yaml
 
 ---
 
-## 10. Step-by-Step: Create Everything Manually
+## 11. Step-by-Step: Create Everything Manually
 
 Here's the complete order to create all AWS resources manually. Follow this sequence because some resources depend on others.
 
@@ -1045,7 +1365,7 @@ kubectl apply -f k8s/
 
 ---
 
-## 11. IAM Policies Explained in Detail
+## 12. IAM Policies Explained in Detail
 
 ### What is an IAM Policy?
 
@@ -1153,7 +1473,7 @@ Role: LambdaRole
 
 ---
 
-## 12. How Floci Emulates All of This Locally
+## 13. How Floci Emulates All of This Locally
 
 When you run `docker compose up`, Floci (`hectorvent/floci:latest`) starts and emulates all 7 AWS services on port 4566. Here's how each service is emulated:
 
