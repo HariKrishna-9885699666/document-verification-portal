@@ -32,8 +32,9 @@ export default function UploadPage() {
     setMessage('');
 
     try {
-      const { documentId, s3Key } = await api.documents.requestUploadUrl(documentType);
-      setMessage(`Document registered (ID: ${documentId}). S3 upload URL generation is integrated at the backend layer.`);
+      const { documentId } = await api.documents.upload(file, documentType);
+
+      setMessage('Document uploaded successfully! Redirecting...');
       setTimeout(() => router.push(`/documents/${documentId}`), 2000);
     } catch (err: any) {
       setMessage(`Error: ${err.message}`);

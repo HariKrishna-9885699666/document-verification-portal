@@ -35,116 +35,43 @@ floci:
 
   # AWS services enabled for DVP
   services:
-    # Core storage (document uploads and OCR results)
     s3:
       enabled: true
 
-    # API Gateway v2 (HTTP API) - REST API front-end
     apigateway:
       enabled: true
-      v2: true                          # Enable HTTP API (not REST API)
 
-    # Lambda - Serverless function execution
+    apigatewayv2:
+      enabled: true
+
     lambda:
       enabled: true
 
-    # EventBridge - Event-driven workflow orchestration
     eventbridge:
       enabled: true
 
-    # RDS - PostgreSQL database (Floci RDS emulation)
     rds:
       enabled: true
 
-    # ECS and EKS - Container orchestration (for OCR workers)
     ecs:
       enabled: true
+
     eks:
       enabled: true
 
-    # IAM and STS - Identity and access management
     iam:
       enabled: true
-    sts:
-      enabled: true
 
-    # CloudFormation - Infrastructure as Code
     cloudformation:
       enabled: true
 
-    # CloudWatch and Logs - Monitoring and observability
-    cloudwatch:
-      enabled: true
-    logs:
+    cloudwatchlogs:
       enabled: true
 
-  # Initialization hooks run on container startup
+    cloudwatchmetrics:
+      enabled: true
+
+  # Init hooks config (scripts are mounted into /etc/floci/init/*.d/)
   init-hooks:
     shell-executable: /bin/bash
     timeout-seconds: 60
-    hooks:
-      - type: startup
-        script: |
-          # Create S3 buckets for document storage
-          aws s3 mb s3://dvp-documents-raw --region us-east-1 2>/dev/null || true
-          aws s3 mb s3://dvp-documents-processed --region us-east-1 2>/dev/null || true
-
-          # Create EventBridge rules for the document verification workflow
-          aws events put-rule \
-            --name dvp-document-uploaded \
-            --event-pattern '{"source": ["dvp.document"], "detail-type": ["DocumentUploaded"]}' \
-            --region us-east-1 2>/dev/null || true
-
-          aws events put-rule \
-            --name dvp-ocr-completed \
-            --event-pattern '{"source": ["dvp.document"], "detail-type": ["OCRCompleted"]}' \
-            --region us-east-1 2>/dev/null || true
-
-          aws events put-rule \
-            --name dvp-verification-completed \
-            --event-pattern '{"source": ["dvp.document"], "detail-type": ["VerificationCompleted"]}' \
-            --region us-east-1 2>/dev/null || true
-
-          # Create IAM roles for the DVP architecture
-          aws iam create-role \
-            --role-name LambdaRole \
-            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
-            --region us-east-1 2>/dev/null || true
-
-          aws iam create-role \
-            --role-name EKSWorkerRole \
-            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
-            --region us-east-1 2>/dev/null || true
-
-          aws iam create-role \
-            --role-name S3AccessRole \
-            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:role/LambdaRole"},"Action":"sts:AssumeRole"}]}' \
-            --region us-east-1 2>/dev/null || true
-
-          # Attach policies to LambdaRole
-          aws iam put-role-policy \
-            --role-name LambdaRole \
-            --policy-name S3Access \
-            --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":["arn:aws:s3:::dvp-documents-raw/*","arn:aws:s3:::dvp-documents-processed/*"]}]}' \
-            --region us-east-1 2>/dev/null || true
-
-          aws iam put-role-policy \
-            --role-name LambdaRole \
-            --policy-name EventBridgeAccess \
-            --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"events:PutEvents","Resource":"*"}]}' \
-            --region us-east-1 2>/dev/null || true
-
-          aws iam put-role-policy \
-            --role-name LambdaRole \
-            --policy-name RDSDataAccess \
-            --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["rds-data:ExecuteStatement","rds-data:BatchExecuteStatement"],"Resource":"*"}]}' \
-            --region us-east-1 2>/dev/null || true
-
-          # Attach policies to EKSWorkerRole
-          aws iam put-role-policy \
-            --role-name EKSWorkerRole \
-            --policy-name S3ReadAccess \
-            --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::dvp-documents-raw/*","arn:aws:s3:::dvp-documents-processed/*"]}]}' \
-            --region us-east-1 2>/dev/null || true
-
-          echo "Floci init complete: S3, EventBridge, IAM configured."

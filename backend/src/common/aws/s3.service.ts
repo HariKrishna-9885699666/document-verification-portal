@@ -41,6 +41,38 @@ export class S3Service {
    * @param s3Key - The S3 object key (path) for the document
    * @returns A presigned URL string for direct PUT upload
    */
+  /**
+   * Upload a file buffer directly to S3 (server-side).
+   * Used when the frontend sends the file to the backend instead of
+   * uploading directly to S3 (avoids CORS issues in local dev).
+   *
+   * @param s3Key  - The S3 object key
+   * @param buffer - The file content as a Buffer
+   * @param contentType - MIME type of the file
+   */
+  async uploadBuffer(s3Key: string, buffer: Buffer, contentType: string): Promise<void> {
+    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+
+    const client = new S3Client({
+      endpoint: this.endpoint,
+      region: this.region,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || 'test',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'test',
+      },
+      forcePathStyle: true,
+    });
+
+    await client.send(
+      new PutObjectCommand({
+        Bucket: this.rawBucket,
+        Key: s3Key,
+        Body: buffer,
+        ContentType: contentType,
+      }),
+    );
+  }
+
   async getSignedUploadUrl(s3Key: string): Promise<string> {
     // Dynamic imports to avoid bundling AWS SDK when not needed
     const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
@@ -62,7 +94,12 @@ export class S3Service {
       Key: s3Key,
     });
 
-    return getSignedUrl(client, command, { expiresIn: 3600 });
+    const url = await getSignedUrl(client, command, { expiresIn: 3600 });
+
+    // Replace Docker internal hostname with localhost for browser-side uploads.
+    // In Docker Compose, the backend uses AWS_ENDPOINT_URL=http://floci:4566,
+    // but the browser running on the host cannot resolve the "floci" hostname.
+    return url.replace('floci', 'localhost');
   }
 
   /**

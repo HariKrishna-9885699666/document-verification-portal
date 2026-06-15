@@ -20,7 +20,6 @@ const API_BASE = '/api';
  * @throws Error with server message on non-OK responses
  */
 async function request(path: string, options: RequestInit = {}) {
-  // Retrieve stored JWT token (only available on client side)
   const token =
     typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
@@ -29,14 +28,42 @@ async function request(path: string, options: RequestInit = {}) {
     ...(options.headers as Record<string, string>),
   };
 
-  // Attach Authorization header if token exists
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
-  // Parse error messages from the server
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(error.message || 'Request failed');
+  }
+
+  return res.json();
+}
+
+/**
+ * Upload a file using multipart/form-data.
+ * Does NOT set Content-Type (browser sets it with boundary).
+ */
+async function uploadFile(path: string, file: File, documentType: string) {
+  const token =
+    typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('documentType', documentType);
+
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+
   if (!res.ok) {
     const error = await res.json().catch(() => ({ message: res.statusText }));
     throw new Error(error.message || 'Request failed');
@@ -60,11 +87,17 @@ export const api = {
 
   /** Document management endpoints (auth required) */
   documents: {
+    upload: (file: File, documentType: string) =>
+      uploadFile('/documents/upload', file, documentType),
+
     requestUploadUrl: (documentType: string) =>
       request('/documents/upload-url', {
         method: 'POST',
         body: JSON.stringify({ documentType }),
       }),
+
+    confirmUpload: (id: string) =>
+      request(`/documents/${id}/confirm-upload`, { method: 'POST' }),
 
     list: () => request('/documents'),
 

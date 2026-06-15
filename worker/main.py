@@ -181,7 +181,7 @@ async def process_document(task: OCRTask):
         async with httpx.AsyncClient() as client:
             resp = await client.patch(
                 f"{BACKEND_URL}/documents/{task.document_id}/ocr",
-                json={"ocr_data": ocr_data},
+                json={"ocrData": ocr_data},
             )
             resp.raise_for_status()
 

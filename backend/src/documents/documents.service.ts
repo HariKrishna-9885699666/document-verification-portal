@@ -49,12 +49,57 @@ export class DocumentsService {
    * @param dto  - Upload request (documentType)
    * @returns Document metadata + presigned S3 upload URL
    */
-  async requestUploadUrl(user: User, dto: RequestUploadUrlDto) {
-    // Generate a unique document ID and S3 key
+  /**
+   * Upload a file to S3 server-side and trigger OCR processing.
+   * Called by the frontend via POST /api/documents/upload.
+   * Avoids CORS issues with direct browser-to-S3 uploads in local dev.
+   */
+  async uploadFile(user: User, file: Express.Multer.File, documentType: string) {
     const documentId = uuid();
     const s3Key = `${user.id}/${documentId}/original.pdf`;
 
-    // Create the document record with initial status
+    const doc = this.documentRepository.create({
+      id: documentId,
+      userId: user.id,
+      documentType: documentType as DocumentType,
+      status: DocumentStatus.UPLOADED,
+      s3Key,
+    });
+    await this.documentRepository.save(doc);
+
+    await this.s3Service.uploadBuffer(s3Key, file.buffer, file.mimetype);
+
+    try {
+      await this.eventBridge.putEvent('DocumentUploaded', {
+        documentId: doc.id,
+        userId: user.id,
+      });
+    } catch (err) {
+      console.error('Failed to fire EventBridge event:', err);
+    }
+
+    try {
+      const workerUrl = process.env.WORKER_URL || 'http://worker:8000';
+      await fetch(`${workerUrl}/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document_id: doc.id,
+          s3_key: doc.s3Key,
+          document_type: doc.documentType,
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to call OCR worker:', err);
+    }
+
+    return { documentId: doc.id };
+  }
+
+  async requestUploadUrl(user: User, dto: RequestUploadUrlDto) {
+    const documentId = uuid();
+    const s3Key = `${user.id}/${documentId}/original.pdf`;
+
     const doc = this.documentRepository.create({
       id: documentId,
       userId: user.id,
@@ -64,20 +109,58 @@ export class DocumentsService {
     });
     await this.documentRepository.save(doc);
 
-    // Generate presigned URL so frontend can upload directly to S3
     const uploadUrl = await this.s3Service.getSignedUploadUrl(s3Key);
-
-    // Fire EventBridge event to trigger OCR processing pipeline
-    await this.eventBridge.putEvent('DocumentUploaded', {
-      documentId: doc.id,
-      userId: user.id,
-      s3Key,
-    });
 
     return {
       documentId: doc.id,
       uploadUrl,
     };
+  }
+
+  /**
+   * Confirm that the file has been uploaded to S3 and trigger OCR processing.
+   * Called by the frontend after a successful PUT to the presigned URL.
+   * Fires DocumentUploaded EventBridge event and directly calls the OCR worker.
+   *
+   * @param id   - Document UUID
+   * @param user - The authenticated user
+   * @returns Updated document record
+   */
+  async confirmUpload(id: string, user: User) {
+    const doc = await this.documentRepository.findOne({ where: { id } });
+    if (!doc) throw new NotFoundException('Document not found');
+    if (doc.userId !== user.id) {
+      throw new NotFoundException('Document not found');
+    }
+    if (doc.status !== DocumentStatus.UPLOADED) {
+      return doc;
+    }
+
+    try {
+      await this.eventBridge.putEvent('DocumentUploaded', {
+        documentId: doc.id,
+        userId: user.id,
+      });
+    } catch (err) {
+      console.error('Failed to fire EventBridge event:', err);
+    }
+
+    try {
+      const workerUrl = process.env.WORKER_URL || 'http://worker:8000';
+      await fetch(`${workerUrl}/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document_id: doc.id,
+          s3_key: doc.s3Key,
+          document_type: doc.documentType,
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to call OCR worker:', err);
+    }
+
+    return doc;
   }
 
   /**
@@ -154,10 +237,10 @@ export class DocumentsService {
     const doc = await this.documentRepository.findOne({ where: { id } });
     if (!doc) throw new NotFoundException('Document not found');
 
-    // Store OCR data and advance status
+    // Store OCR data and advance status through the pipeline
     doc.ocrData = ocrData;
     doc.status = DocumentStatus.OCR_COMPLETED;
-    const saved = await this.documentRepository.save(doc);
+    await this.documentRepository.save(doc);
 
     // Copy OCR JSON to the processed S3 bucket for audit trail
     await this.s3Service.copyToProcessed(doc.s3Key!, ocrData);
@@ -167,6 +250,10 @@ export class DocumentsService {
       documentId: doc.id,
       userId: doc.userId,
     });
+
+    // Automatically transition to REVIEW_PENDING so admin can review
+    doc.status = DocumentStatus.REVIEW_PENDING;
+    const saved = await this.documentRepository.save(doc);
 
     return saved;
   }

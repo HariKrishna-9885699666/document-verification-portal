@@ -4,11 +4,12 @@
  * All endpoints require JWT authentication (JwtAuthGuard).
  *
  * Endpoints:
- *   POST   /api/documents/upload-url    - Request presigned S3 upload URL
- *   GET    /api/documents               - List documents
- *   GET    /api/documents/:id           - Get document details
- *   GET    /api/documents/:id/status    - Get verification status
- *   PATCH  /api/documents/:id/ocr       - Receive OCR results (from worker)
+ *   POST   /api/documents/upload-url       - Request presigned S3 upload URL
+ *   POST   /api/documents/:id/confirm-upload - Confirm S3 upload done, trigger OCR
+ *   GET    /api/documents                  - List documents
+ *   GET    /api/documents/:id              - Get document details
+ *   GET    /api/documents/:id/status       - Get verification status
+ *   PATCH  /api/documents/:id/ocr          - Receive OCR results (from worker)
  */
 
 import {
@@ -20,8 +21,12 @@ import {
   Param,
   UseGuards,
   Req,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Public } from '../auth/public.decorator';
 import { DocumentsService } from './documents.service';
 import { RequestUploadUrlDto } from './dto/upload-url.dto';
 import { UpdateOcrDto } from './dto/update-ocr.dto';
@@ -32,12 +37,37 @@ export class DocumentsController {
   constructor(private documentsService: DocumentsService) {}
 
   /**
+   * Upload a document file directly to the backend.
+   * The backend uploads it to S3 and triggers OCR processing.
+   * This avoids CORS issues with browser-to-S3 direct uploads in local dev.
+   */
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file'))
+  uploadFile(
+    @Req() req,
+    @UploadedFile() file: Express.Multer.File,
+    @Body('documentType') documentType: string,
+  ) {
+    return this.documentsService.uploadFile(req.user, file, documentType);
+  }
+
+  /**
    * Request a presigned S3 upload URL for a new document.
    * Also creates the document record in UPLOADED status.
+   * Used in production for direct browser-to-S3 uploads.
    */
   @Post('upload-url')
   requestUploadUrl(@Req() req, @Body() dto: RequestUploadUrlDto) {
     return this.documentsService.requestUploadUrl(req.user, dto);
+  }
+
+  /**
+   * Confirm that the file has been uploaded to S3 and trigger OCR processing.
+   * Called by the frontend after a successful direct-to-S3 upload.
+   */
+  @Post(':id/confirm-upload')
+  confirmUpload(@Param('id') id: string, @Req() req) {
+    return this.documentsService.confirmUpload(id, req.user);
   }
 
   /**
@@ -68,6 +98,7 @@ export class DocumentsController {
    * Internal endpoint called by the OCR worker to store extracted data.
    * Transitions document to OCR_COMPLETED status.
    */
+  @Public()
   @Patch(':id/ocr')
   updateOcr(@Param('id') id: string, @Body() dto: UpdateOcrDto) {
     return this.documentsService.updateOcrData(id, dto.ocrData);

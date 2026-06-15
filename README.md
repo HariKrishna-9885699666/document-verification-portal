@@ -13,10 +13,11 @@ A cloud-native web application for secure document upload, verification, and sta
 5. [Setup & Running](#5-setup--running)
 6. [API Reference](#6-api-reference)
 7. [Frontend Pages](#7-frontend-pages)
-8. [AWS Infrastructure](#8-aws-infrastructure)
-9. [Local Development with Floci](#9-local-development-with-floci)
-10. [Kubernetes Deployment](#10-kubernetes-deployment)
-11. [Environment Variables](#11-environment-variables)
+8. [How to Use the Application](#8-how-to-use-the-application)
+9. [AWS Infrastructure](#9-aws-infrastructure)
+10. [Local Development with Floci](#10-local-development-with-floci)
+11. [Kubernetes Deployment](#11-kubernetes-deployment)
+12. [Environment Variables](#12-environment-variables)
 
 ---
 
@@ -66,29 +67,32 @@ Think of the system like a **digital document checking office** with multiple de
 | You enter your name, email, and password | Your password is scrambled (hashed) so even we can't read it |
 | The system gives you a **JWT token** | Like a digital ID card — you show this with every request to prove who you are |
 
-#### Step 2: User Uploads a Document
+#### Step 2: User Uploads a Document (3-Step Process)
 
 | What happens | Plain English |
 |---|---|
 | You select document type (Aadhaar, PAN, etc.) and pick a file | Like choosing a category before uploading |
 | You click "Upload" | The system asks "Where should I store this?" |
-| Backend calls **S3Service** (`backend/src/common/aws/s3.service.ts`) | S3 is like a massive file cabinet in the cloud |
-| S3 generates a **presigned URL** | Like getting a special one-time-use locker key — you use this key to put your file directly into the cabinet |
-| Backend fires a **DocumentUploaded** event via **EventBridgeService** (`backend/src/common/aws/eventbridge.service.ts`) | EventBridge is like a post office — it sends a notification saying "New document arrived!" to whoever is listening |
+| **Step 2a** — The frontend sends the file to `POST /api/documents/upload` as multipart/form-data | Sends the file to the backend along with the document type |
+| **Step 2b** — The backend uploads the file to S3 using the AWS SDK (`s3.service.ts`) | Backend puts the file into the S3 file cabinet directly (no CORS issues since this is server-to-server) |
+| **Step 2c** — The backend fires a **DocumentUploaded** event via **EventBridgeService** | EventBridge is like a post office — it sends a notification saying "New document arrived!" to whoever is listening |
+| **Step 2d** — The backend directly calls the **OCR Worker** at `http://worker:8000/process` with the document details | Like a manager walking over to the factory floor and saying "Here's a new document, start working on it" |
+
+> **Production note:** In production with real AWS S3, the frontend would use the presigned URL flow (`upload-url` → PUT to S3 → `confirm-upload`) to avoid routing large files through the backend. CORS is configured on the real S3 bucket.
 
 #### Step 3: Document is Processed
 
 | What happens | Plain English |
 |---|---|
-| The **OCR Worker** (`worker/main.py`) hears the "New document arrived!" message | Like a factory worker getting notified about a new item on the conveyor belt |
-| The worker downloads the file from S3 | Takes the document out of the file cabinet |
+| The **OCR Worker** (`worker/main.py`) receives the processing request | Like a factory worker getting handed a new item |
+| The worker downloads the file from S3 using the `s3Key` | Takes the document out of the file cabinet |
 | Runs **Tesseract OCR** (text recognition) | Like a machine that reads the document and types out all the text |
 | Uses **document-type extractors** (regex patterns) to find specific fields: | Like filling out a form by finding the right boxes: |
 | &nbsp;&nbsp;• For **Aadhaar**: finds the 12-digit number, name, DOB | |
 | &nbsp;&nbsp;• For **PAN**: finds the 10-char alphanumeric PAN number | |
 | &nbsp;&nbsp;• For **Passport**: finds the passport number | |
 | Posts extracted data back via `PATCH /api/documents/:id/ocr` | Tells the backend "I found these details in the document" |
-| Backend stores OCR data in the database and copies it to S3 processed bucket | Files the extracted information away |
+| Backend stores OCR data (transitions to `OCR_COMPLETED`), copies to S3 processed bucket, then auto-transitions to `REVIEW_PENDING` | Files the extracted information and marks it ready for human review |
 | Fires **OCRCompleted** event | Sends a message: "OCR is done! Ready for human review." |
 
 #### Step 4: Admin Reviews the Document
@@ -116,11 +120,11 @@ Think of the system like a **digital document checking office** with multiple de
 ### The Status Workflow
 
 ```
-UPLOADED ──► PROCESSING ──► OCR_COMPLETED ──► REVIEW_PENDING ──► APPROVED
-                                                               └──► REJECTED
-   ↑              ↑               ↑                   ↑
- You upload   Worker starts   OCR finishes        Admin reviews
- a document   processing      extracting text
+UPLOADED ──► OCR_COMPLETED ──► REVIEW_PENDING ──► APPROVED
+                                              └──► REJECTED
+   ↑               ↑                   ↑
+Upload done     OCR finishes        Admin reviews
++ confirmed     extracting text     and decides
 ```
 
 ### Where AWS Services Fit In (and What Floci Does)
@@ -396,7 +400,7 @@ docker run -d --name dvp-postgres \
 docker run -d --name dvp-floci \
   -p 4566:4566 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  hectorvent/floci:latest
+  floci/floci:latest
 ```
 
 Then initialize AWS resources:
@@ -475,8 +479,10 @@ All endpoints are prefixed with `/api`. Authenticated endpoints require `Authori
 ### Documents (Authentication required)
 
 | Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/documents/upload-url` | Request presigned S3 upload URL |
+|---|---|---|---|
+| `POST` | `/api/documents/upload` | Upload file + document type (multipart/form-data), triggers OCR |
+| `POST` | `/api/documents/upload-url` | Register document + get presigned S3 URL (for production direct upload) |
+| `POST` | `/api/documents/:id/confirm-upload` | Confirm file uploaded to S3, trigger OCR (production flow) |
 | `GET` | `/api/documents` | List user's documents |
 | `GET` | `/api/documents/:id` | Get document details |
 | `GET` | `/api/documents/:id/status` | Get verification status |
@@ -506,7 +512,61 @@ All endpoints are prefixed with `/api`. Authenticated endpoints require `Authori
 
 ---
 
-## 8. AWS Infrastructure
+## 8. How to Use the Application
+
+### Default Admin Credentials
+
+| Role | Email | Password |
+|---|---|---|
+| **Administrator** | `admin@example.com` | `Admin1234!` |
+
+Register this admin account once when you first run the application by sending a POST request to `/api/auth/register`:
+
+```bash
+curl -X POST http://localhost:4000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Admin","email":"admin@example.com","password":"Admin1234!"}'
+```
+
+Then log in at `/login` with these credentials to access the **Admin Dashboard** (`/admin`).
+
+### Step-by-Step Walkthrough
+
+#### As a Regular User
+
+1. **Register** — Go to `/register` and create an account (name, email, password)
+2. **Login** — Go to `/login` with your new credentials
+3. **Dashboard** — You'll land at `/dashboard` (initially empty)
+4. **Upload a document** — Click "Upload Document" or go to `/upload`:
+   - Select a document type (Aadhaar, PAN, Passport, etc.)
+   - Pick a file (PDF, JPG, or PNG, max 20MB)
+   - Click "Upload" — the frontend sends the file to the backend, which uploads it to S3 and triggers OCR processing
+5. **Wait for processing** — The document will transition: `UPLOADED` → `OCR_COMPLETED` → `REVIEW_PENDING` (usually seconds)
+6. **Check status** — Visit `/documents/[id]` to see the extracted OCR data
+7. **Wait for admin review** — An admin must approve or reject the document
+8. **Final status** — Once reviewed, the status changes to `APPROVED` (green) or `REJECTED` (red)
+
+#### As an Admin
+
+1. **Login** — Go to `/login` with `admin@example.com` / `Admin1234!`
+2. **Admin Dashboard** — Go to `/admin` to see all documents with `REVIEW_PENDING` status
+3. **Review a document** — Click a document ID to view its details (original file, OCR-extracted data)
+4. **Approve or Reject** — Add optional remarks and click the action button
+5. **Check result** — The document status updates, and the user can see the final verdict
+
+### Status Meanings
+
+| Status | Color | Meaning |
+|---|---|---|
+| `UPLOADED` | Gray | File uploaded to S3, OCR pending |
+| `OCR_COMPLETED` | Yellow | OCR extracted text from the document |
+| `REVIEW_PENDING` | Blue | Waiting for admin review |
+| `APPROVED` | Green | Document verified and accepted |
+| `REJECTED` | Red | Document rejected by admin |
+
+---
+
+## 9. AWS Infrastructure
 
 ### Resource Mapping (PRD Section 9)
 
@@ -541,7 +601,7 @@ The `iam/` directory contains JSON definitions for all IAM roles. These are appl
 
 ---
 
-## 9. Local Development with Floci
+## 10. Local Development with Floci
 
 Floci emulates 53+ AWS services locally on port 4566. It's a drop-in replacement for LocalStack and requires no auth token.
 
@@ -568,7 +628,7 @@ bash backend/scripts/init-floci.sh
 
 ```bash
 # Check Floci health
-curl http://localhost:4566/_local/health
+curl http://localhost:4566/_floci/health
 
 # List S3 buckets
 aws s3 ls --endpoint-url http://localhost:4566
@@ -592,7 +652,7 @@ The S3 client uses `forcePathStyle: true` because Floci serves S3 in path-style 
 
 ---
 
-## 10. Kubernetes Deployment
+## 11. Kubernetes Deployment
 
 For production deployment on Amazon EKS, apply the manifests in the `k8s/` directory:
 
@@ -620,7 +680,7 @@ kubectl get hpa -n dvp
 
 ---
 
-## 11. Environment Variables
+## 12. Environment Variables
 
 ### Root `.env` (auto-loaded by docker-compose)
 
