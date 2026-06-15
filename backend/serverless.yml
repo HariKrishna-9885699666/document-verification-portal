@@ -1,0 +1,88 @@
+# =============================================================================
+# DVP Backend - Serverless Framework Configuration
+# =============================================================================
+# Deploys the NestJS application as an AWS Lambda function behind API Gateway v2.
+# For local development, use docker-compose.yml which runs the standard HTTP server.
+#
+# Usage:
+#   sls deploy --stage dev          # Deploy to AWS
+#   sls offline --stage local       # Run locally with serverless-offline
+#
+# Architecture (as defined in PRD Section 8):
+#   Frontend → API Gateway → Lambda (NestJS) → RDS (PostgreSQL)
+#   User Upload → S3 → EventBridge → EKS Worker Pods → OCR → RDS
+# =============================================================================
+
+service: dvp-backend
+
+frameworkVersion: '4'
+
+plugins:
+  - serverless-offline
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  region: us-east-1
+  stage: ${opt:stage, 'local'}
+
+  # Environment variables injected into the Lambda function
+  environment:
+    DATABASE_HOST: ${env:DATABASE_HOST, 'localhost'}
+    DATABASE_PORT: ${env:DATABASE_PORT, '5432'}
+    DATABASE_USER: ${env:DATABASE_USER, 'dvp_user'}
+    DATABASE_PASSWORD: ${env:DATABASE_PASSWORD, 'dvp_pass'}
+    DATABASE_NAME: ${env:DATABASE_NAME, 'dvp_db'}
+    JWT_SECRET: ${env:JWT_SECRET, 'dev-secret-key-change-in-production'}
+    JWT_EXPIRATION: ${env:JWT_EXPIRATION, '24h'}
+    AWS_ENDPOINT_URL: ${env:AWS_ENDPOINT_URL, 'http://localhost:4566'}
+    AWS_DEFAULT_REGION: ${env:AWS_DEFAULT_REGION, 'us-east-1'}
+    AWS_ACCESS_KEY_ID: ${env:AWS_ACCESS_KEY_ID, 'test'}
+    AWS_SECRET_ACCESS_KEY: ${env:AWS_SECRET_ACCESS_KEY, 'test'}
+
+  # IAM role for the Lambda function (LambdaRole from PRD)
+  iam:
+    role:
+      name: dvp-LambdaRole-${sls:stage}
+      statements:
+        # Allow Lambda to read/write documents in S3
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:PutObjectAcl
+          Resource:
+            - arn:aws:s3:::dvp-documents-raw/*
+            - arn:aws:s3:::dvp-documents-processed/*
+        # Allow Lambda to publish events to EventBridge
+        - Effect: Allow
+          Action:
+            - events:PutEvents
+          Resource: '*'
+        # Allow Lambda to execute RDS Data API queries
+        - Effect: Allow
+          Action:
+            - rds-data:ExecuteStatement
+            - rds-data:BatchExecuteStatement
+          Resource: '*'
+
+functions:
+  # Single Lambda function that handles all API Gateway routes
+  # The NestJS router dispatches internally based on the request path
+  api:
+    handler: dist/handler.handler  # serverless-http wrapped NestJS app
+    timeout: 30                    # Max execution time (seconds)
+    memorySize: 512                # Memory allocated (MB)
+    events:
+      - httpApi:
+          method: ANY
+          path: /{proxy+}          # Catch-all route for all API paths
+      - httpApi:
+          method: ANY
+          path: /                  # Root path
+
+custom:
+  serverless-offline:
+    httpPort: 4000
+    lambdaPort: 4002
+    noPrependStageInUrl: true      # Don't add /stage prefix to URLs

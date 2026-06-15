@@ -1,0 +1,52 @@
+{
+  "RoleName": "EKSWorkerRole",
+  "Description": "IAM role for EKS worker nodes that run OCR processing. Grants S3 read access for downloading documents and EKS cluster access for pod management.",
+  "AssumeRolePolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "ec2.amazonaws.com"
+        },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "Policies": [
+    {
+      "PolicyName": "S3ReadAccess",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "s3:GetObject"
+            ],
+            "Resource": [
+              "arn:aws:s3:::dvp-documents-raw/*",
+              "arn:aws:s3:::dvp-documents-processed/*"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "PolicyName": "EKSAccess",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "eks:DescribeCluster",
+              "eks:ListClusters"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ]
+}

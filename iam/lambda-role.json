@@ -1,0 +1,84 @@
+{
+  "RoleName": "LambdaRole",
+  "Description": "IAM role for the NestJS Lambda function (auth-service, document-service, admin-service). Grants S3 read/write for document storage, EventBridge publish for workflow events, RDS Data API access for database queries, and CloudWatch Logs for monitoring.",
+  "AssumeRolePolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "Policies": [
+    {
+      "PolicyName": "S3Access",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "s3:GetObject",
+              "s3:PutObject",
+              "s3:PutObjectAcl"
+            ],
+            "Resource": [
+              "arn:aws:s3:::dvp-documents-raw/*",
+              "arn:aws:s3:::dvp-documents-processed/*"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "PolicyName": "EventBridgeAccess",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": "events:PutEvents",
+            "Resource": "*"
+          }
+        ]
+      }
+    },
+    {
+      "PolicyName": "RDSDataAccess",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "rds-data:ExecuteStatement",
+              "rds-data:BatchExecuteStatement"
+            ],
+            "Resource": "*"
+          }
+        ]
+      }
+    },
+    {
+      "PolicyName": "CloudWatchLogs",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "logs:CreateLogGroup",
+              "logs:CreateLogStream",
+              "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:*:*:*"
+          }
+        ]
+      }
+    }
+  ]
+}

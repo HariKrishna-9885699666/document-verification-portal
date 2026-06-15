@@ -1,0 +1,24 @@
+# =============================================================================
+# Backend Service - Kubernetes Internal Service
+# =============================================================================
+# Exposes the NestJS backend as a ClusterIP service within the EKS cluster.
+# This allows the OCR worker pods to communicate with the backend API
+# using the service name "backend" instead of an IP address.
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: dvp
+  labels:
+    app: backend
+    component: api
+spec:
+  selector:
+    app: backend
+  ports:
+    - protocol: TCP
+      port: 4000
+      targetPort: 4000
+  type: ClusterIP

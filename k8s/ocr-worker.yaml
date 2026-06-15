@@ -1,0 +1,127 @@
+# =============================================================================
+# OCR Worker - EKS Deployment (PRD Section 9)
+# =============================================================================
+# This deployment simulates an EKS worker pod that runs OCR processing.
+# In production, these pods are triggered by EventBridge events from S3.
+#
+# Components:
+#   - Deployment: Runs 2 OCR worker pods (auto-scales up to 10)
+#   - Service: Internal ClusterIP for pod-to-pod communication
+#   - HPA: Auto-scales based on CPU utilization (70% target)
+#
+# The worker pulls documents from S3 (dvp-documents-raw), runs Tesseract OCR,
+# and posts results back to the backend API.
+# =============================================================================
+
+---
+# -------------------------
+# OCR Worker Deployment
+# -------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+  namespace: dvp
+  labels:
+    app: ocr-worker
+    component: processing
+spec:
+  # Run 2 replicas for high availability
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ocr-worker
+  template:
+    metadata:
+      labels:
+        app: ocr-worker
+    spec:
+      # Service account with minimal RBAC permissions
+      serviceAccountName: dvp-worker-sa
+      containers:
+        - name: ocr-worker
+          # In production, use ECR image: <account>.dkr.ecr.us-east-1.amazonaws.com/dvp-ocr-worker:latest
+          image: dvp-ocr-worker:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            # Backend API URL for posting OCR results
+            - name: BACKEND_URL
+              value: "http://backend:4000/api"
+            # AWS configuration (points to Floci in local dev, real AWS in production)
+            - name: AWS_ENDPOINT_URL
+              value: "http://floci:4566"
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: AWS_ACCESS_KEY_ID
+              value: "test"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "test"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          # Health checks for Kubernetes pod management
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+# -------------------------
+# OCR Worker Service
+# -------------------------
+# Internal ClusterIP service for the backend to communicate with workers
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocr-worker
+  namespace: dvp
+  labels:
+    app: ocr-worker
+spec:
+  selector:
+    app: ocr-worker
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+
+---
+# -------------------------
+# Horizontal Pod Autoscaler
+# -------------------------
+# Automatically scales worker pods based on CPU utilization
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ocr-worker-hpa
+  namespace: dvp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ocr-worker
+  minReplicas: 2    # Minimum running pods
+  maxReplicas: 10   # Maximum during load spikes
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # Scale up at 70% CPU usage

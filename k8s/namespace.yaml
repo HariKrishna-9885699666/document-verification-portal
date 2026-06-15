@@ -1,0 +1,14 @@
+# =============================================================================
+# Kubernetes Namespace - DVP Environment
+# =============================================================================
+# All DVP resources are deployed in the 'dvp' namespace for isolation.
+# Apply with: kubectl apply -f k8s/
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dvp
+  labels:
+    app: document-verification-portal
+    environment: production

@@ -1,0 +1,41 @@
+{
+  "RoleName": "S3AccessRole",
+  "Description": "Cross-account IAM role that grants LambdaRole full S3 access to the DVP buckets. Used for delegated S3 operations.",
+  "AssumeRolePolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::000000000000:role/LambdaRole"
+        },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "Policies": [
+    {
+      "PolicyName": "S3FullAccess",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "s3:ListBucket",
+              "s3:GetObject",
+              "s3:PutObject",
+              "s3:DeleteObject"
+            ],
+            "Resource": [
+              "arn:aws:s3:::dvp-documents-raw",
+              "arn:aws:s3:::dvp-documents-raw/*",
+              "arn:aws:s3:::dvp-documents-processed",
+              "arn:aws:s3:::dvp-documents-processed/*"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

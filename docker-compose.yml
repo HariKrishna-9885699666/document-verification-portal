@@ -1,0 +1,151 @@
+# =============================================================================
+# DVP - Document Verification Portal
+# Docker Compose - Local Development Stack
+# =============================================================================
+# This compose file runs the entire DVP stack locally using:
+#   - Floci: AWS emulator (S3, EventBridge, API Gateway, Lambda, IAM, EKS)
+#   - PostgreSQL: Document metadata database
+#   - Backend (NestJS): Core business logic APIs
+#   - Worker (Python FastAPI): OCR processing service
+#   - Frontend (Next.js): React-based user interface
+#   - floci-init: One-shot initialization of S3 buckets, IAM roles, EventBridge rules
+#
+# Usage:
+#   docker compose up -d                    # Start all services
+#   docker compose logs -f                  # Follow logs
+#   docker compose down -v                  # Stop and remove volumes
+# =============================================================================
+
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Floci - AWS Local Emulator
+  # ---------------------------------------------------------------------------
+  # Emulates 53+ AWS services on port 4566 including:
+  #   S3, EventBridge, API Gateway v2, Lambda, IAM, EKS, RDS, CloudWatch, etc.
+  # No auth token required - uses dummy credentials.
+  # ---------------------------------------------------------------------------
+  floci:
+    image: hectorvent/floci:latest
+    ports:
+      - "4566:4566"
+    volumes:
+      # Floci configuration file (service enable/disable, storage mode)
+      - ./floci/application.yml:/app/config/application.yml:ro
+      # Persistent storage for S3, DynamoDB, etc.
+      - floci-data:/app/data
+      # Required for container-based services: Lambda, RDS, ElastiCache
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - env/floci.env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_local/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL - Primary Database
+  # ---------------------------------------------------------------------------
+  # Stores users, documents metadata, OCR data, audit logs.
+  # Floci also provides RDS emulation, but we use real PostgreSQL for reliability.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - env/postgres.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Backend - NestJS API Server
+  # ---------------------------------------------------------------------------
+  # Runs as a standard HTTP server (port 4000) during local development.
+  # Can also be deployed as an AWS Lambda function via serverless.yml using
+  # the serverless-http adapter (see src/handler.ts).
+  # Exposes REST APIs for auth, document management, admin review, audit.
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.lambda
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+    env_file:
+      - env/backend.env
+    depends_on:
+      floci:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Worker - Python OCR Processing Service
+  # ---------------------------------------------------------------------------
+  # Simulates an EKS worker pod that processes documents.
+  # In production, this runs on Amazon EKS; locally it runs as a Docker container.
+  # Uses Tesseract OCR to extract text from documents and posts results back.
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    ports:
+      - "${WORKER_PORT}:${WORKER_PORT}"
+    env_file:
+      - env/worker.env
+    depends_on:
+      floci:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # Frontend - Next.js Application
+  # ---------------------------------------------------------------------------
+  # React-based user interface with pages for:
+  #   Login/Register, Dashboard, Upload, Status Tracking, Admin Review
+  # Proxies /api/* requests to the backend via next.config.ts rewrites.
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${FRONTEND_PORT}:${FRONTEND_PORT}"
+    env_file:
+      - env/frontend.env
+    depends_on:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Floci Init - One-Shot Resource Initialization
+  # ---------------------------------------------------------------------------
+  # Runs once on startup to create AWS resources in Floci:
+  #   - S3 buckets: dvp-documents-raw, dvp-documents-processed
+  #   - EventBridge rules: DocumentUploaded, OCRCompleted, VerificationCompleted
+  #   - IAM roles: LambdaRole, EKSWorkerRole, S3AccessRole
+  # Uses the official AWS CLI image pointed at Floci's endpoint.
+  # ---------------------------------------------------------------------------
+  floci-init:
+    image: amazon/aws-cli:latest
+    entrypoint: ["/bin/sh", "/scripts/init-floci.sh"]
+    volumes:
+      - ./backend/scripts/init-floci.sh:/scripts/init-floci.sh:ro
+    env_file:
+      - env/floci-init.env
+    depends_on:
+      floci:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  floci-data:
